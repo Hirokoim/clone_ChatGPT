@@ -63,3 +63,22 @@ create policy "insert own messages"
 -- テーブルそのものへの権限を与える。実際に何が許可されるかはRLSポリシーが絞り込む。
 grant select, insert, update, delete on conversations to authenticated;
 grant select, insert on messages to authenticated;
+
+-- 第6章: 使いすぎを防ぐ(認証ユーザーごとの上限)
+-- ユーザーごと・日付ごとに、その日送ったメッセージ数を記録する。
+-- このテーブルはサーバー(service_role key)からのみ読み書きする想定なので、
+-- RLSは有効にしておくが、authenticatedロールへのGRANT/ポリシーは作らない
+-- (ブラウザから直接触らせない = service_roleだけがRLSをバイパスして操作できる)。
+create table usage (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  usage_date date not null default current_date,
+  message_count int not null default 0,
+  primary key (user_id, usage_date)
+);
+
+alter table usage enable row level security;
+
+-- service_roleはRLSこそバイパスできるが、テーブルそのものへのGRANTは別途必要。
+-- 「Automatically expose new tables」をOFFにしているため、service_roleにも
+-- 明示的に権限を与えないと "permission denied for table usage" になる。
+grant select, insert, update on usage to service_role;

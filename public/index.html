@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>ChatGPTクローン (第3章: REST 1往復)</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
+    #log { border: 1px solid #ccc; padding: 12px; min-height: 200px; white-space: pre-wrap; }
+    form { display: flex; gap: 8px; margin-top: 12px; }
+    input { flex: 1; padding: 8px; }
+    button { padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <h1>ChatGPTクローン</h1>
+  <div id="log"></div>
+  <form id="form">
+    <input id="input" type="text" placeholder="メッセージを入力" autocomplete="off" />
+    <button type="submit">送信</button>
+  </form>
+
+  <script>
+    const log = document.getElementById("log");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      log.textContent += `\nあなた: ${text}`;
+      input.value = "";
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "あなたは親切なアシスタントです。" },
+            { role: "user", content: text },
+          ],
+        }),
+      });
+      const data = await res.json();
+      log.textContent += `\nAI: ${data.reply.content}`;
+    });
+  </script>
+</body>
+</html>

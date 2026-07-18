@@ -141,6 +141,47 @@ app.post("/api/summarize", async (req, res) => {
   res.json({ summary: completion.choices[0].message.content });
 });
 
+// 第10章: メモリ(会話をまたいで覚える)
+// 「覚えておいて」ボタンが押されたときだけ、今の会話から永続的な記憶を抽出・更新する。
+// 第9章の要約(1つの会話の中だけ)と違い、これはユーザー1人につき1つ、
+// どの会話を開いても差し込まれる。
+app.post("/api/remember", async (req, res) => {
+  const userId = await getAuthenticatedUserId(req);
+  if (!userId) {
+    res.status(401).json({ error: "ログインが必要です。" });
+    return;
+  }
+
+  const { existingMemory, recentMessages } = req.body;
+
+  const conversationText = recentMessages
+    .map((m: { role: string; content: string }) => `${m.role}: ${m.content}`)
+    .join("\n");
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "あなたはユーザーについての記憶を管理するアシスタントです。今回の会話から、" +
+          "どの会話でも今後ずっと覚えておくべき情報(名前・好み・属性など、ユーザー個人に" +
+          "関する恒久的な事実)だけを抜き出し、既存の記憶に追加・更新してください。" +
+          "今回だけの一時的な話題(天気・その日の予定など)は含めないでください。",
+      },
+      {
+        role: "user",
+        content:
+          `既存の記憶:\n${existingMemory || "(まだ記憶はありません)"}\n\n` +
+          `今回の会話:\n${conversationText}\n\n` +
+          "上記を踏まえて、更新後の記憶を出力してください。",
+      },
+    ],
+  });
+
+  res.json({ memory: completion.choices[0].message.content });
+});
+
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });

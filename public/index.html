@@ -43,6 +43,8 @@
         <input id="input" type="text" placeholder="メッセージを入力" autocomplete="off" />
         <button type="submit">送信</button>
       </form>
+      <button id="rememberBtn" style="margin-top: 8px;">覚えておいて</button>
+      <div id="memoryStatus" style="font-size: 12px; color: #666; margin-top: 4px;"></div>
     </div>
   </div>
 
@@ -59,6 +61,8 @@
     let conversationSummary = "";
     // fullHistoryの何件目までを、すでにconversationSummaryへ組み込み済みか。
     let summarizedCount = 0;
+    // ユーザーの永続的な記憶(会話をまたいで、どの会話にも差し込まれる)。
+    let userMemory = "";
 
     const loginScreen = document.getElementById("loginScreen");
     const appScreen = document.getElementById("appScreen");
@@ -72,6 +76,8 @@
     const logEl = document.getElementById("log");
     const formEl = document.getElementById("form");
     const inputEl = document.getElementById("input");
+    const rememberBtn = document.getElementById("rememberBtn");
+    const memoryStatus = document.getElementById("memoryStatus");
 
     async function init() {
       const res = await fetch("/api/config");
@@ -94,6 +100,7 @@
         userInfo.textContent = currentUser.email;
         loadConversations();
         updateUsageCounter();
+        loadMemory();
       } else {
         loginScreen.style.display = "block";
         appScreen.style.display = "none";
@@ -134,6 +141,21 @@
       }
       const { count, limit } = await res.json();
       usageCounter.textContent = `本日の利用回数: ${count} / ${limit}`;
+    }
+
+    // 第10章: ユーザーの永続的な記憶を読み込む(まだ無ければ空文字のまま)。
+    async function loadMemory() {
+      const { data, error } = await supabaseClient
+        .from("memories")
+        .select("content")
+        .eq("user_id", currentUser.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error(error);
+        return;
+      }
+      userMemory = data?.content ?? "";
     }
 
     async function loadConversations() {
@@ -289,12 +311,17 @@
       if (error) console.error(error);
     }
 
-    // AIに実際に送る配列を組み立てる: system設定 + これまでの要約 + 直近10件 + 今回の発言。
+    // AIに実際に送る配列を組み立てる:
+    // system設定 + 第10章:永続的な記憶 + 第9章:これまでの要約 + 直近10件 + 今回の発言。
     function buildChatPayload(newUserText) {
       const windowStart = Math.max(0, fullHistory.length - RECENT_WINDOW_SIZE);
       const recentMessages = fullHistory.slice(windowStart);
 
       const payload = [{ role: "system", content: SYSTEM_PROMPT }];
+      if (userMemory) {
+        // 会話をまたいで覚えている内容。どの会話を開いていても差し込む。
+        payload.push({ role: "system", content: `ユーザーについて覚えていること: ${userMemory}` });
+      }
       if (conversationSummary) {
         payload.push({ role: "system", content: `これまでの会話の要約: ${conversationSummary}` });
       }
@@ -302,6 +329,57 @@
       payload.push({ role: "user", content: newUserText });
       return payload;
     }
+
+    // 第10章: 「覚えておいて」ボタン。今の会話(直近分)から、会話をまたいで覚えるべき
+    // 情報を抜き出し、既存の記憶に追加・更新する。
+    rememberBtn.addEventListener("click", async () => {
+      if (!currentConversationId || fullHistory.length === 0) {
+        memoryStatus.textContent = "覚えておく内容がまだありません。";
+        return;
+      }
+
+      memoryStatus.textContent = "覚えています...";
+      rememberBtn.disabled = true;
+
+      try {
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        const recentMessages = fullHistory.slice(-RECENT_WINDOW_SIZE);
+
+        const res = await fetch("/api/remember", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ existingMemory: userMemory, recentMessages }),
+        });
+
+        if (!res.ok) {
+          memoryStatus.textContent = "覚えるのに失敗しました。";
+          console.error("remember failed", res.status, await res.text());
+          return;
+        }
+
+        const { memory } = await res.json();
+        userMemory = memory;
+
+        const { error } = await supabaseClient
+          .from("memories")
+          .upsert(
+            { user_id: currentUser.id, content: userMemory, updated_at: new Date().toISOString() },
+            { onConflict: "user_id" }
+          );
+        if (error) {
+          console.error(error);
+          memoryStatus.textContent = "保存に失敗しました。";
+          return;
+        }
+
+        memoryStatus.textContent = "覚えました！";
+      } finally {
+        rememberBtn.disabled = false;
+      }
+    });
 
     // ステップ3: 送信ボタンを「ロック」する(二重送信を防ぐ)。
     let isSending = false;

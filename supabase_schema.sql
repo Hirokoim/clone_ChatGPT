@@ -82,3 +82,13 @@ alter table usage enable row level security;
 -- 「Automatically expose new tables」をOFFにしているため、service_roleにも
 -- 明示的に権限を与えないと "permission denied for table usage" になる。
 grant select, insert, update on usage to service_role;
+
+-- 第7章: 順番が崩れるとき(中断・エラーとuser→assistantの交互)
+-- 発言が「完成済み(done)」か「まだ途中(pending)」かの札を持たせる。
+-- 送信中にブラウザが閉じられる等で中断されても、pendingのまま残った発言を
+-- 次回の読み込み時に判別・除外できるようにする。
+alter table messages
+  add column status text not null default 'done' check (status in ('pending', 'done'));
+
+-- authenticatedはstatusを更新できる必要がある(pending→done)ので、updateも許可する。
+grant update on messages to authenticated;

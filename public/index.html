@@ -162,7 +162,7 @@
 
       const { data, error } = await supabaseClient
         .from("messages")
-        .select("role, content")
+        .select("role, content, status")
         .eq("conversation_id", id)
         .order("created_at", { ascending: true });
 
@@ -171,9 +171,16 @@
         return;
       }
 
-      messages = [{ role: "system", content: SYSTEM_PROMPT }, ...data];
+      // AIに送る履歴は、崩れていないか整えてから使う(pendingは除外)。
+      messages = [{ role: "system", content: SYSTEM_PROMPT }, ...cleanHistory(data)];
+
+      // 画面表示は、中断されたpending発言もそのまま見せる(何が起きたか分かるように)。
       logEl.textContent = data
-        .map((m) => `${m.role === "user" ? "あなた" : "AI"}: ${m.content}`)
+        .map((m) => {
+          const label = m.role === "user" ? "あなた" : "AI";
+          const note = m.status === "pending" ? "(未完了)" : "";
+          return `${label}: ${m.content}${note}`;
+        })
         .join("\n");
     }
 
@@ -197,49 +204,86 @@
       return currentConversationId;
     }
 
-    async function saveMessage(conversationId, role, content) {
+    // status: "pending"(処理中・宙ぶらりん) or "done"(完了)。
+    // AIへの送信を始めたらpending、返事が全部届いたらdoneに変える。
+    async function saveMessage(conversationId, role, content, status) {
+      const { data, error } = await supabaseClient
+        .from("messages")
+        .insert({ conversation_id: conversationId, role, content, status })
+        .select("id")
+        .single();
+      if (error) console.error(error);
+      return data?.id;
+    }
+
+    async function markMessageDone(messageId) {
       const { error } = await supabaseClient
         .from("messages")
-        .insert({ conversation_id: conversationId, role, content });
+        .update({ status: "done" })
+        .eq("id", messageId);
       if (error) console.error(error);
     }
 
+    // ステップ2: 会話を開くとき「整える」。
+    // 完了(done)した発言だけを残し、pending(中断されて宙ぶらりんのまま)は捨てる。
+    // pendingをAPIへ送らないことで、userが2連続するような崩れを防ぐ。
+    function cleanHistory(rows) {
+      return rows.filter((m) => m.status === "done");
+    }
+
+    // ステップ3: 送信ボタンを「ロック」する(二重送信を防ぐ)。
+    let isSending = false;
+
     formEl.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (isSending) return; // 送信中なら、なにもしない(連打を無視)
       const text = inputEl.value.trim();
       if (!text) return;
-      logEl.textContent += `\nあなた: ${text}`;
-      inputEl.value = "";
 
-      const conversationId = await ensureConversation(text);
-      messages.push({ role: "user", content: text });
-      await saveMessage(conversationId, "user", text);
+      isSending = true;
+      formEl.querySelector("button").disabled = true;
 
-      const { data: { session } } = await supabaseClient.auth.getSession();
+      try {
+        logEl.textContent += `\nあなた: ${text}`;
+        inputEl.value = "";
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ messages }),
-      });
+        const conversationId = await ensureConversation(text);
+        messages.push({ role: "user", content: text });
+        // AIへの送信を始めたのでpending(まだ途中)として保存する。
+        const userMessageId = await saveMessage(conversationId, "user", text, "pending");
 
-      if (res.status === 429) {
-        const errorData = await res.json();
-        logEl.textContent += `\n${errorData.error}`;
+        const { data: { session } } = await supabaseClient.auth.getSession();
+
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ messages }),
+        });
+
+        if (res.status === 429) {
+          const errorData = await res.json();
+          logEl.textContent += `\n${errorData.error}`;
+          updateUsageCounter();
+          return;
+        }
+
+        const data = await res.json();
+        const replyText = data.reply.content;
+        logEl.textContent += `\nAI: ${replyText}`;
         updateUsageCounter();
-        return;
+
+        messages.push({ role: "assistant", content: replyText });
+        // 返事が全部届いたので、user発言をdoneに変え、assistant発言もdoneで保存する。
+        await markMessageDone(userMessageId);
+        await saveMessage(conversationId, "assistant", replyText, "done");
+      } finally {
+        // 成功でも失敗でも、必ずロックを解除する。
+        isSending = false;
+        formEl.querySelector("button").disabled = false;
       }
-
-      const data = await res.json();
-      const replyText = data.reply.content;
-      logEl.textContent += `\nAI: ${replyText}`;
-      updateUsageCounter();
-
-      messages.push({ role: "assistant", content: replyText });
-      await saveMessage(conversationId, "assistant", replyText);
     });
 
     init();

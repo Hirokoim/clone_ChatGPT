@@ -10,6 +10,15 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(express.json());
 app.use(express.static("public"));
 
+// SupabaseのURLとanon keyはブラウザに公開してよい値(RLSで保護される)。
+// .envから読み込んで、ブラウザに渡すためのエンドポイント。
+app.get("/api/config", (req, res) => {
+  res.json({
+    supabaseUrl: process.env.SUPABASE_URL,
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
+  });
+});
+
 app.post("/api/chat", async (req, res) => {
   const { messages } = req.body;
 

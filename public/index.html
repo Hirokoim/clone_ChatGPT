@@ -2,41 +2,202 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <title>ChatGPTクローン (第4章: 会話を続ける)</title>
+  <title>ChatGPTクローン (第5章: 会話ログと複数セッション)</title>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <style>
-    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
-    #log { border: 1px solid #ccc; padding: 12px; min-height: 200px; white-space: pre-wrap; }
+    body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+    #sidebar { width: 260px; border-right: 1px solid #ccc; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; }
+    #main { flex: 1; max-width: 600px; margin: 40px auto; padding: 0 16px; }
+    #log { border: 1px solid #ccc; padding: 12px; min-height: 300px; white-space: pre-wrap; }
     form { display: flex; gap: 8px; margin-top: 12px; }
     input { flex: 1; padding: 8px; }
-    button { padding: 8px 16px; }
+    button { padding: 8px 16px; cursor: pointer; }
+    .conv-item { padding: 8px; cursor: pointer; border-radius: 4px; }
+    .conv-item:hover { background: #eee; }
+    .conv-item.active { background: #ddd; }
+    #userInfo { font-size: 12px; color: #666; margin-bottom: 8px; word-break: break-all; }
+    #loginScreen { margin: 80px auto; text-align: center; }
   </style>
 </head>
 <body>
-  <h1>ChatGPTクローン</h1>
-  <div id="log"></div>
-  <form id="form">
-    <input id="input" type="text" placeholder="メッセージを入力" autocomplete="off" />
-    <button type="submit">送信</button>
-  </form>
+  <div id="loginScreen" style="display: none;">
+    <h1>ChatGPTクローン</h1>
+    <p>会話を保存するにはログインしてください。</p>
+    <button id="loginBtn">Googleでログイン</button>
+  </div>
+
+  <div id="appScreen" style="display: none; width: 100%;">
+    <div id="sidebar">
+      <div id="userInfo"></div>
+      <button id="newConvBtn">＋ 新しい会話</button>
+      <button id="logoutBtn" style="margin-top: 8px;">ログアウト</button>
+      <hr style="width: 100%;" />
+      <div id="convList"></div>
+    </div>
+    <div id="main">
+      <h1>ChatGPTクローン</h1>
+      <div id="log"></div>
+      <form id="form">
+        <input id="input" type="text" placeholder="メッセージを入力" autocomplete="off" />
+        <button type="submit">送信</button>
+      </form>
+    </div>
+  </div>
 
   <script>
-    const log = document.getElementById("log");
-    const form = document.getElementById("form");
-    const input = document.getElementById("input");
+    const SYSTEM_PROMPT = "あなたは侍言葉を話す親切なアシスタントです。";
 
-    // 会話履歴。ここに全ターンを積み上げて、送信のたびに「全部」渡す。
-    const messages = [
-      { role: "system", content: "あなたは親切なアシスタントです。" },
-    ];
+    let supabaseClient;
+    let currentUser = null;
+    let currentConversationId = null;
+    // 表示中の会話の履歴。system + これまでのuser/assistant発言。
+    let messages = [{ role: "system", content: SYSTEM_PROMPT }];
 
-    form.addEventListener("submit", async (e) => {
+    const loginScreen = document.getElementById("loginScreen");
+    const appScreen = document.getElementById("appScreen");
+    const loginBtn = document.getElementById("loginBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const newConvBtn = document.getElementById("newConvBtn");
+    const userInfo = document.getElementById("userInfo");
+    const convList = document.getElementById("convList");
+    const logEl = document.getElementById("log");
+    const formEl = document.getElementById("form");
+    const inputEl = document.getElementById("input");
+
+    async function init() {
+      const res = await fetch("/api/config");
+      const { supabaseUrl, supabaseAnonKey } = await res.json();
+      supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+
+      supabaseClient.auth.onAuthStateChange((_event, session) => {
+        handleSession(session);
+      });
+
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      handleSession(session);
+    }
+
+    function handleSession(session) {
+      currentUser = session?.user ?? null;
+      if (currentUser) {
+        loginScreen.style.display = "none";
+        appScreen.style.display = "flex";
+        userInfo.textContent = currentUser.email;
+        loadConversations();
+      } else {
+        loginScreen.style.display = "block";
+        appScreen.style.display = "none";
+      }
+    }
+
+    loginBtn.addEventListener("click", async () => {
+      await supabaseClient.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: window.location.origin,
+          queryParams: { prompt: "select_account" },
+        },
+      });
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      await supabaseClient.auth.signOut();
+    });
+
+    newConvBtn.addEventListener("click", () => {
+      currentConversationId = null;
+      messages = [{ role: "system", content: SYSTEM_PROMPT }];
+      logEl.textContent = "";
+      highlightActiveConversation();
+    });
+
+    async function loadConversations() {
+      const { data, error } = await supabaseClient
+        .from("conversations")
+        .select("id, title, created_at")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error(error);
+        return;
+      }
+
+      convList.innerHTML = "";
+      for (const conv of data) {
+        const div = document.createElement("div");
+        div.className = "conv-item";
+        div.textContent = conv.title;
+        div.dataset.id = conv.id;
+        div.addEventListener("click", () => openConversation(conv.id));
+        convList.appendChild(div);
+      }
+      highlightActiveConversation();
+    }
+
+    function highlightActiveConversation() {
+      for (const el of convList.children) {
+        el.classList.toggle("active", el.dataset.id === currentConversationId);
+      }
+    }
+
+    async function openConversation(id) {
+      currentConversationId = id;
+      highlightActiveConversation();
+
+      const { data, error } = await supabaseClient
+        .from("messages")
+        .select("role, content")
+        .eq("conversation_id", id)
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        console.error(error);
+        return;
+      }
+
+      messages = [{ role: "system", content: SYSTEM_PROMPT }, ...data];
+      logEl.textContent = data
+        .map((m) => `${m.role === "user" ? "あなた" : "AI"}: ${m.content}`)
+        .join("\n");
+    }
+
+    async function ensureConversation(firstMessage) {
+      if (currentConversationId) return currentConversationId;
+
+      const title = firstMessage.slice(0, 20);
+      const { data, error } = await supabaseClient
+        .from("conversations")
+        .insert({ user_id: currentUser.id, title })
+        .select("id")
+        .single();
+
+      if (error) {
+        console.error(error);
+        throw error;
+      }
+
+      currentConversationId = data.id;
+      await loadConversations();
+      return currentConversationId;
+    }
+
+    async function saveMessage(conversationId, role, content) {
+      const { error } = await supabaseClient
+        .from("messages")
+        .insert({ conversation_id: conversationId, role, content });
+      if (error) console.error(error);
+    }
+
+    formEl.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const text = input.value.trim();
+      const text = inputEl.value.trim();
       if (!text) return;
-      log.textContent += `\nあなた: ${text}`;
-      input.value = "";
+      logEl.textContent += `\nあなた: ${text}`;
+      inputEl.value = "";
 
+      const conversationId = await ensureConversation(text);
       messages.push({ role: "user", content: text });
+      await saveMessage(conversationId, "user", text);
 
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -44,10 +205,14 @@
         body: JSON.stringify({ messages }),
       });
       const data = await res.json();
-      log.textContent += `\nAI: ${data.reply.content}`;
+      const replyText = data.reply.content;
+      logEl.textContent += `\nAI: ${replyText}`;
 
-      messages.push({ role: "assistant", content: data.reply.content });
+      messages.push({ role: "assistant", content: replyText });
+      await saveMessage(conversationId, "assistant", replyText);
     });
+
+    init();
   </script>
 </body>
 </html>

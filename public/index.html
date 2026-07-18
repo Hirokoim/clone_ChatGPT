@@ -48,12 +48,17 @@
 
   <script>
     const SYSTEM_PROMPT = "あなたは侍言葉を話す親切なアシスタントです。";
+    const RECENT_WINDOW_SIZE = 10; // AIに毎回渡す「直近」の発言件数
 
     let supabaseClient;
     let currentUser = null;
     let currentConversationId = null;
-    // 表示中の会話の履歴。system + これまでのuser/assistant発言。
-    let messages = [{ role: "system", content: SYSTEM_PROMPT }];
+    // 表示中の会話の全文履歴(system除く、DBの内容と一致)。要約されても消さずに残す。
+    let fullHistory = [];
+    // これまでの要約文。空文字なら「まだ要約なし」。
+    let conversationSummary = "";
+    // fullHistoryの何件目までを、すでにconversationSummaryへ組み込み済みか。
+    let summarizedCount = 0;
 
     const loginScreen = document.getElementById("loginScreen");
     const appScreen = document.getElementById("appScreen");
@@ -111,7 +116,9 @@
 
     newConvBtn.addEventListener("click", () => {
       currentConversationId = null;
-      messages = [{ role: "system", content: SYSTEM_PROMPT }];
+      fullHistory = [];
+      conversationSummary = "";
+      summarizedCount = 0;
       logEl.textContent = "";
       highlightActiveConversation();
     });
@@ -162,6 +169,18 @@
       currentConversationId = id;
       highlightActiveConversation();
 
+      const { data: conv, error: convError } = await supabaseClient
+        .from("conversations")
+        .select("summary, summarized_count")
+        .eq("id", id)
+        .single();
+
+      if (convError) {
+        console.error(convError);
+        return;
+      }
+      conversationSummary = conv.summary;
+
       const { data, error } = await supabaseClient
         .from("messages")
         .select("role, content, status")
@@ -173,8 +192,11 @@
         return;
       }
 
-      // AIに送る履歴は、崩れていないか整えてから使う(pendingは除外)。
-      messages = [{ role: "system", content: SYSTEM_PROMPT }, ...cleanHistory(data)];
+      // 全文履歴(要約の元ネタ・直近抽出の対象)は、崩れていないか整えてから保持する。
+      fullHistory = cleanHistory(data);
+      // 安全装置: summarized_countがfullHistoryの件数を超えていたら(データのズレ)、
+      // fullHistoryの件数に合わせて自己修復する。超えたままだと二度と要約が更新されなくなる。
+      summarizedCount = Math.min(conv.summarized_count, fullHistory.length);
 
       // 画面表示は、中断されたpending発言もそのまま見せる(何が起きたか分かるように)。
       logEl.textContent = data
@@ -233,6 +255,54 @@
       return rows.filter((m) => m.status === "done");
     }
 
+    // 第9章: 直近10件から外れた古い発言があれば、要約に組み込んで更新する。
+    // 「前回までの要約」と「今回新たに外れた分の差分」だけをAIに渡す(全文は渡さない)。
+    async function summarizeIfNeeded(conversationId) {
+      const windowStart = Math.max(0, fullHistory.length - RECENT_WINDOW_SIZE);
+      if (windowStart <= summarizedCount) return; // まだ直近10件から外れた発言はない
+
+      const messagesToFold = fullHistory.slice(summarizedCount, windowStart);
+
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      const res = await fetch("/api/summarize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ previousSummary: conversationSummary, messagesToFold }),
+      });
+
+      if (!res.ok) {
+        console.error("summarize failed", res.status, await res.text());
+        return;
+      }
+
+      const { summary } = await res.json();
+      conversationSummary = summary;
+      summarizedCount = windowStart;
+
+      const { error } = await supabaseClient
+        .from("conversations")
+        .update({ summary: conversationSummary, summarized_count: summarizedCount })
+        .eq("id", conversationId);
+      if (error) console.error(error);
+    }
+
+    // AIに実際に送る配列を組み立てる: system設定 + これまでの要約 + 直近10件 + 今回の発言。
+    function buildChatPayload(newUserText) {
+      const windowStart = Math.max(0, fullHistory.length - RECENT_WINDOW_SIZE);
+      const recentMessages = fullHistory.slice(windowStart);
+
+      const payload = [{ role: "system", content: SYSTEM_PROMPT }];
+      if (conversationSummary) {
+        payload.push({ role: "system", content: `これまでの会話の要約: ${conversationSummary}` });
+      }
+      payload.push(...recentMessages);
+      payload.push({ role: "user", content: newUserText });
+      return payload;
+    }
+
     // ステップ3: 送信ボタンを「ロック」する(二重送信を防ぐ)。
     let isSending = false;
 
@@ -250,11 +320,18 @@
         inputEl.value = "";
 
         const conversationId = await ensureConversation(text);
-        messages.push({ role: "user", content: text });
+
+        // 第9章: 送る前に、直近10件から外れた古い発言があれば要約に折りたたむ。
+        // (fullHistoryはまだ今回の発言を含まない = 「これまでの」履歴の状態で判定する)
+        await summarizeIfNeeded(conversationId);
+
         // AIへの送信を始めたのでpending(まだ途中)として保存する。
         const userMessageId = await saveMessage(conversationId, "user", text, "pending");
 
         const { data: { session } } = await supabaseClient.auth.getSession();
+
+        // 全文(messages/DB)はそのまま残しつつ、AIに渡すのは要約+直近10件+今回の発言だけ。
+        const chatPayload = buildChatPayload(text);
 
         const res = await fetch("/api/chat", {
           method: "POST",
@@ -262,7 +339,7 @@
             "Content-Type": "application/json",
             Authorization: `Bearer ${session.access_token}`,
           },
-          body: JSON.stringify({ messages }),
+          body: JSON.stringify({ messages: chatPayload }),
         });
 
         if (res.status === 429) {
@@ -277,10 +354,12 @@
         logEl.textContent += `\nAI: ${replyText}`;
         updateUsageCounter();
 
-        // 第8章: サーバーが見積もったトークン数を画面に表示する。
+        // 第8章: サーバーが見積もったトークン数を画面に表示する(要約+直近10件+今回分の実際のサイズ)。
         tokenCounter.textContent = `概算トークン数: ${data.estimatedTokens}${data.nearLimit ? "(上限に近づいています)" : ""}`;
 
-        messages.push({ role: "assistant", content: replyText });
+        // 全文履歴(fullHistory)には、要約対象になった分も含めてすべて積み上げておく。
+        fullHistory.push({ role: "user", content: text });
+        fullHistory.push({ role: "assistant", content: replyText });
         // 返事が全部届いたので、user発言をdoneに変え、assistant発言もdoneで保存する。
         await markMessageDone(userMessageId);
         await saveMessage(conversationId, "assistant", replyText, "done");

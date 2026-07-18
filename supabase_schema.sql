@@ -101,3 +101,29 @@ grant update on messages to authenticated;
 alter table conversations
   add column summary text not null default '',
   add column summarized_count int not null default 0;
+
+-- 第10章: メモリ(会話をまたいで覚える)
+-- 第9章の要約は「1つの会話の中」だけで効くが、memoriesはユーザー1人につき1行で、
+-- どの会話を開いても(新しい会話でも)差し込まれる、会話をまたいだ永続的な記憶。
+-- 更新は自動ではなく、「覚えておいて」ボタンを押したときだけ行う。
+create table memories (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  content text not null default '',
+  updated_at timestamptz not null default now()
+);
+
+alter table memories enable row level security;
+
+create policy "select own memory"
+  on memories for select
+  using (auth.uid() = user_id);
+
+create policy "insert own memory"
+  on memories for insert
+  with check (auth.uid() = user_id);
+
+create policy "update own memory"
+  on memories for update
+  using (auth.uid() = user_id);
+
+grant select, insert, update on memories to authenticated;

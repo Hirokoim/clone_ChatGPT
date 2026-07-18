@@ -30,6 +30,7 @@
     <div id="sidebar">
       <div id="userInfo"></div>
       <div id="usageCounter" style="font-size: 12px; color: #666; margin-bottom: 8px;"></div>
+      <div id="tokenCounter" style="font-size: 12px; color: #666; margin-bottom: 8px;"></div>
       <button id="newConvBtn">＋ 新しい会話</button>
       <button id="logoutBtn" style="margin-top: 8px;">ログアウト</button>
       <hr style="width: 100%;" />
@@ -61,6 +62,7 @@
     const newConvBtn = document.getElementById("newConvBtn");
     const userInfo = document.getElementById("userInfo");
     const usageCounter = document.getElementById("usageCounter");
+    const tokenCounter = document.getElementById("tokenCounter");
     const convList = document.getElementById("convList");
     const logEl = document.getElementById("log");
     const formEl = document.getElementById("form");
@@ -274,6 +276,9 @@
         const replyText = data.reply.content;
         logEl.textContent += `\nAI: ${replyText}`;
         updateUsageCounter();
+
+        // 第8章: サーバーが見積もったトークン数を画面に表示する。
+        tokenCounter.textContent = `概算トークン数: ${data.estimatedTokens}${data.nearLimit ? "(上限に近づいています)" : ""}`;
 
         messages.push({ role: "assistant", content: replyText });
         // 返事が全部届いたので、user発言をdoneに変え、assistant発言もdoneで保存する。

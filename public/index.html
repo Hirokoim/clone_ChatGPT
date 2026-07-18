@@ -29,6 +29,7 @@
   <div id="appScreen" style="display: none; width: 100%;">
     <div id="sidebar">
       <div id="userInfo"></div>
+      <div id="usageCounter" style="font-size: 12px; color: #666; margin-bottom: 8px;"></div>
       <button id="newConvBtn">＋ 新しい会話</button>
       <button id="logoutBtn" style="margin-top: 8px;">ログアウト</button>
       <hr style="width: 100%;" />
@@ -59,6 +60,7 @@
     const logoutBtn = document.getElementById("logoutBtn");
     const newConvBtn = document.getElementById("newConvBtn");
     const userInfo = document.getElementById("userInfo");
+    const usageCounter = document.getElementById("usageCounter");
     const convList = document.getElementById("convList");
     const logEl = document.getElementById("log");
     const formEl = document.getElementById("form");
@@ -84,6 +86,7 @@
         appScreen.style.display = "flex";
         userInfo.textContent = currentUser.email;
         loadConversations();
+        updateUsageCounter();
       } else {
         loginScreen.style.display = "block";
         appScreen.style.display = "none";
@@ -110,6 +113,19 @@
       logEl.textContent = "";
       highlightActiveConversation();
     });
+
+    async function updateUsageCounter() {
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      const res = await fetch("/api/usage", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        console.error("usage fetch failed", res.status, await res.text());
+        return;
+      }
+      const { count, limit } = await res.json();
+      usageCounter.textContent = `本日の利用回数: ${count} / ${limit}`;
+    }
 
     async function loadConversations() {
       const { data, error } = await supabaseClient
@@ -199,14 +215,28 @@
       messages.push({ role: "user", content: text });
       await saveMessage(conversationId, "user", text);
 
+      const { data: { session } } = await supabaseClient.auth.getSession();
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify({ messages }),
       });
+
+      if (res.status === 429) {
+        const errorData = await res.json();
+        logEl.textContent += `\n${errorData.error}`;
+        updateUsageCounter();
+        return;
+      }
+
       const data = await res.json();
       const replyText = data.reply.content;
       logEl.textContent += `\nAI: ${replyText}`;
+      updateUsageCounter();
 
       messages.push({ role: "assistant", content: replyText });
       await saveMessage(conversationId, "assistant", replyText);

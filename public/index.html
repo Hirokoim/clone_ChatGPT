@@ -330,6 +330,52 @@
       return payload;
     }
 
+    // 第11章: SSEのレスポンス本文を読み、断片(delta)が届くたびonDeltaを呼ぶ。
+    // 最後に届く{done:true, fullReply, ...}で終わりを検知し、返事の全文を返す。
+    async function readChatStream(res, onDelta) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = ""; // 半端に届いた分を次回に持ち越すための一時置き場
+      let fullReply = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split("\n\n"); // SSEは "\n\n" で1つのイベントの区切り
+          buffer = events.pop(); // 最後の要素は次のreadに続く可能性があるので取っておく
+
+          for (const event of events) {
+            if (!event.startsWith("data: ")) continue;
+            const payload = JSON.parse(event.slice("data: ".length));
+
+            if (payload.error) {
+              onDelta(`\n${payload.error}`);
+              continue;
+            }
+            if (payload.done) {
+              fullReply = payload.fullReply;
+              tokenCounter.textContent =
+                `概算トークン数: ${payload.estimatedTokens}${payload.nearLimit ? "(上限に近づいています)" : ""}`;
+              continue;
+            }
+            if (payload.delta) {
+              fullReply += payload.delta; // 途中で通信が切れても、ここまでの分は保存できるように
+              onDelta(payload.delta);
+            }
+          }
+        }
+      } catch (err) {
+        // 通信が途中で切れた場合。無言で止まらず、失敗したことを画面に伝える。
+        console.error("stream read failed:", err);
+        onDelta("\n(通信が途中で切れました)");
+      }
+
+      return fullReply;
+    }
+
     // 第10章: 「覚えておいて」ボタン。今の会話(直近分)から、会話をまたいで覚えるべき
     // 情報を抜き出し、既存の記憶に追加・更新する。
     rememberBtn.addEventListener("click", async () => {
@@ -427,13 +473,13 @@
           return;
         }
 
-        const data = await res.json();
-        const replyText = data.reply.content;
-        logEl.textContent += `\nAI: ${replyText}`;
-        updateUsageCounter();
+        // 第11章: SSEで少しずつ届く断片(delta)を、届いた端から画面に足していく。
+        logEl.textContent += `\nAI: `;
+        const replyText = await readChatStream(res, (delta) => {
+          logEl.textContent += delta;
+        });
 
-        // 第8章: サーバーが見積もったトークン数を画面に表示する(要約+直近10件+今回分の実際のサイズ)。
-        tokenCounter.textContent = `概算トークン数: ${data.estimatedTokens}${data.nearLimit ? "(上限に近づいています)" : ""}`;
+        updateUsageCounter();
 
         // 全文履歴(fullHistory)には、要約対象になった分も含めてすべて積み上げておく。
         fullHistory.push({ role: "user", content: text });

@@ -62,6 +62,10 @@ app.get("/api/usage", async (req, res) => {
   res.json({ count, limit: DAILY_MESSAGE_LIMIT });
 });
 
+// 第11章: ストリーミング(SSE編)。
+// レスポンス全体が揃うのを待たず、AIが生成した文字を届いた端から少しずつ送る。
+// 通常のJSONレスポンスではなく、"data: {...}\n\n" という形式のイベントを
+// 繋ぎっぱなしのコネクション上で何度も書き込んでいく(Server-Sent Events)。
 app.post("/api/chat", async (req, res) => {
   const userId = await getAuthenticatedUserId(req);
   if (!userId) {
@@ -70,6 +74,7 @@ app.post("/api/chat", async (req, res) => {
   }
 
   // 【守り②】今日すでに何回使ったかを確認し、上限を超えていたら429で断る。
+  // (SSEを開始する前に判定する。開始後はステータスコードを変更できないため。)
   const currentCount = await getTodayUsageCount(userId);
   if (currentCount >= DAILY_MESSAGE_LIMIT) {
     res.status(429).json({ error: "本日の利用回数の上限に達しました。また明日お試しください。" });
@@ -82,10 +87,49 @@ app.post("/api/chat", async (req, res) => {
   const estimatedTokens = estimateTokenCount(messages);
   const nearLimit = isNearTokenLimit(messages, MODEL_CONTEXT_WINDOW);
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages,
-  });
+  // SSE用のヘッダーを設定し、コネクションを繋ぎっぱなしにする。
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  // 本番でnginx等のプロキシを挟むと、SSEの応答がバッファリングされて
+  // 「手元では動くのに本番で固まる」ことがある。バッファリングを無効化しておく。
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  let fullReply = ""; // 最終的にDBの使用量記録や後始末に使う、返事の全文
+
+  // クライアントが接続を切った(タブを閉じた・リロードした等)ら、
+  // OpenAIへのリクエストも打ち切る。繋ぎっぱなしのまま課金だけ発生するのを防ぐ。
+  const abortController = new AbortController();
+  req.on("close", () => abortController.abort());
+
+  try {
+    const stream = await openai.chat.completions.create(
+      {
+        model: "gpt-4o-mini",
+        messages,
+        stream: true, // ここがストリーミングの切り替えスイッチ
+      },
+      { signal: abortController.signal }
+    );
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content ?? "";
+      if (!delta) continue;
+      fullReply += delta;
+      // 届いた断片(delta)だけを、その都度クライアントへ送る。
+      res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+    }
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      // クライアント側が既にいなくなっているので、書き込まずそのまま終了する。
+      return;
+    }
+    console.error("streaming failed:", err);
+    res.write(`data: ${JSON.stringify({ error: "生成中にエラーが発生しました。" })}\n\n`);
+    res.end();
+    return;
+  }
 
   // 使用回数を+1する(なければ1件目として作成)。
   const today = new Date().toISOString().slice(0, 10);
@@ -97,11 +141,9 @@ app.post("/api/chat", async (req, res) => {
     );
   if (upsertError) console.error("usage upsert failed:", upsertError);
 
-  res.json({
-    reply: completion.choices[0].message,
-    estimatedTokens,
-    nearLimit,
-  });
+  // 最後に「終わりました」の合図と、返事の全文・トークン数などをまとめて送る。
+  res.write(`data: ${JSON.stringify({ done: true, fullReply, estimatedTokens, nearLimit })}\n\n`);
+  res.end();
 });
 
 // 第9章: 直近10件から外れた古い発言を、要約に追加で組み込む。

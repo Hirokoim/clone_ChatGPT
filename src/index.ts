@@ -2,10 +2,12 @@ import "dotenv/config";
 import express from "express";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import { estimateTokenCount, isNearTokenLimit } from "./tokenEstimate";
 
 const app = express();
 const port = process.env.PORT ?? 3000;
 const DAILY_MESSAGE_LIMIT = 20;
+const MODEL_CONTEXT_WINDOW = 128000; // gpt-4o-miniのコンテキスト上限(トークン数)
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -76,6 +78,10 @@ app.post("/api/chat", async (req, res) => {
 
   const { messages } = req.body;
 
+  // 第8章: 送る前に、会話全体のトークン数をざっくり見積もっておく。
+  const estimatedTokens = estimateTokenCount(messages);
+  const nearLimit = isNearTokenLimit(messages, MODEL_CONTEXT_WINDOW);
+
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages,
@@ -91,7 +97,11 @@ app.post("/api/chat", async (req, res) => {
     );
   if (upsertError) console.error("usage upsert failed:", upsertError);
 
-  res.json({ reply: completion.choices[0].message });
+  res.json({
+    reply: completion.choices[0].message,
+    estimatedTokens,
+    nearLimit,
+  });
 });
 
 app.listen(port, () => {

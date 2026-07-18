@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <title>ChatGPTクローン (第3章: REST 1往復)</title>
+  <title>ChatGPTクローン (第4章: 会話を続ける)</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
     #log { border: 1px solid #ccc; padding: 12px; min-height: 200px; white-space: pre-wrap; }
@@ -24,6 +24,11 @@
     const form = document.getElementById("form");
     const input = document.getElementById("input");
 
+    // 会話履歴。ここに全ターンを積み上げて、送信のたびに「全部」渡す。
+    const messages = [
+      { role: "system", content: "あなたは親切なアシスタントです。" },
+    ];
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const text = input.value.trim();
@@ -31,18 +36,17 @@
       log.textContent += `\nあなた: ${text}`;
       input.value = "";
 
+      messages.push({ role: "user", content: text });
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            { role: "system", content: "あなたは親切なアシスタントです。" },
-            { role: "user", content: text },
-          ],
-        }),
+        body: JSON.stringify({ messages }),
       });
       const data = await res.json();
       log.textContent += `\nAI: ${data.reply.content}`;
+
+      messages.push({ role: "assistant", content: data.reply.content });
     });
   </script>
 </body>

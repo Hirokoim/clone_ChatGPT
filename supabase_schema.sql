@@ -92,3 +92,12 @@ alter table messages
 
 -- authenticatedはstatusを更新できる必要がある(pending→done)ので、updateも許可する。
 grant update on messages to authenticated;
+
+-- 第9章: 溢れさせない(要約+ログのハイブリッド)
+-- messages(全文ログ)はそのまま残しつつ、AIに毎回渡すのは
+-- 「system設定 + これまでの要約 + 直近10件 + 今回の発言」だけに絞る。
+-- summary: 古い会話をまとめた要約文。summarized_count: 何件目までを要約に
+-- 組み込み済みか(次回、直近10件から外れた「差分」だけを追加要約するための目印)。
+alter table conversations
+  add column summary text not null default '',
+  add column summarized_count int not null default 0;

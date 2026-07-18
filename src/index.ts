@@ -104,6 +104,43 @@ app.post("/api/chat", async (req, res) => {
   });
 });
 
+// 第9章: 直近10件から外れた古い発言を、要約に追加で組み込む。
+// 「前回までの要約」+「今回新たに外れた分の発言」だけをAIに渡し、要約を更新させる。
+app.post("/api/summarize", async (req, res) => {
+  const userId = await getAuthenticatedUserId(req);
+  if (!userId) {
+    res.status(401).json({ error: "ログインが必要です。" });
+    return;
+  }
+
+  const { previousSummary, messagesToFold } = req.body;
+
+  const foldedText = messagesToFold
+    .map((m: { role: string; content: string }) => `${m.role}: ${m.content}`)
+    .join("\n");
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "あなたは会話ログを要約するアシスタントです。固有名詞(人名・地名・作品名など)や" +
+          "決定事項(合意した内容・約束・結論)は省略せず残し、簡潔にまとめてください。",
+      },
+      {
+        role: "user",
+        content:
+          `これまでの要約:\n${previousSummary || "(まだ要約はありません)"}\n\n` +
+          `新たに要約に組み込む会話:\n${foldedText}\n\n` +
+          "上記を踏まえて、これまでの要約を更新してください。",
+      },
+    ],
+  });
+
+  res.json({ summary: completion.choices[0].message.content });
+});
+
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
